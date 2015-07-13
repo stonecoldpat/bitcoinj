@@ -144,6 +144,124 @@ public class DefaultRiskAnalysisTest {
     }
 
     @Test
+    public void nonStandardExceedSize() {
+        Transaction nonStandardTx = new Transaction(params);
+        nonStandardTx.addInput(params.getGenesisBlock().getTransactions().get(0).getOutput(0));
+        
+        // Our non-standard transaction is 100021 bytes
+        for (int i=0; i < 2272; i++) {
+            nonStandardTx.addOutput(MILLICOIN.divide(4), key1);
+        }
+
+        assertEquals(DefaultRiskAnalysis.RuleViolation.TRANSACTION_TOO_LARGE, DefaultRiskAnalysis.isStandard(nonStandardTx));
+    }
+    
+    @Test
+    public void isPushOnly() {
+        Transaction nonStandardTx = new Transaction(params);
+        nonStandardTx.addInput(params.getGenesisBlock().getTransactions().get(0).getOutput(0));
+        ScriptBuilder buildScript = new ScriptBuilder();
+        String data = "data";
+        buildScript.data(data.getBytes());
+        nonStandardTx.addOutput(MILLICOIN, buildScript.build());
+        
+        assertEquals(DefaultRiskAnalysis.RuleViolation.INPUT_ONLY_PUSHDATA, DefaultRiskAnalysis.isStandard(nonStandardTx));
+    }
+    
+    @Test
+    public void inputSize() {
+        Transaction nonStandardTx = new Transaction(params);
+        
+        int inputSize = 1651;
+        byte[] data = new byte[inputSize];
+  
+        for (int i=0; i < inputSize; i++) {
+            data[i] = ScriptOpCodes.OP_1;
+        }
+        
+        TransactionInput input = new TransactionInput(params, params.getGenesisBlock().getTransactions().get(0), data); 
+        nonStandardTx.addInput(input);
+        
+        assertEquals(DefaultRiskAnalysis.RuleViolation.INPUT_TOO_LARGE, DefaultRiskAnalysis.isStandard(nonStandardTx));
+    }
+    
+    @Test
+    public void opreturnBelowLimit() {
+        Transaction nonStandardTx = new Transaction(params);
+        nonStandardTx.addInput(params.getGenesisBlock().getTransactions().get(0).getOutput(0));
+        
+        ScriptBuilder buildScript = new ScriptBuilder();
+        String data = "data";
+        buildScript.op(ScriptOpCodes.OP_RETURN);
+        buildScript.data(data.getBytes());
+        nonStandardTx.addOutput(MILLICOIN, buildScript.build());
+        
+        assertEquals(RiskAnalysis.Result.OK, DefaultRiskAnalysis.FACTORY.create(wallet, nonStandardTx, NO_DEPS).analyze());
+    }
+    
+    @Test
+    public void opreturnAboveLimit() {
+        Transaction nonStandardTx = new Transaction(params);
+        nonStandardTx.addInput(params.getGenesisBlock().getTransactions().get(0).getOutput(0));
+        
+        ScriptBuilder buildScript = new ScriptBuilder();
+        String data = "data";
+        buildScript.op(ScriptOpCodes.OP_RETURN);
+        buildScript.data(data.getBytes());
+        nonStandardTx.addOutput(MILLICOIN, buildScript.build());
+        nonStandardTx.addOutput(MILLICOIN, buildScript.build());
+        
+        assertEquals(DefaultRiskAnalysis.RuleViolation.EXCEEDED_OPRETURN_LIMIT, DefaultRiskAnalysis.isStandard(nonStandardTx));
+    }
+     
+    @Test
+    public void checkMultisigTotalKeys() {
+        Transaction standardTx = new Transaction(params);
+        standardTx.addInput(params.getGenesisBlock().getTransactions().get(0).getOutput(0));
+
+        List<ECKey> keys = new ArrayList<ECKey>();
+        
+        for (int i=0; i < 3; i++) {
+            keys.add(new ECKey());
+        }
+      
+        Script script = ScriptBuilder.createMultiSigOutputScript(3, keys);
+        standardTx.addOutput(MILLICOIN, script);
+        
+        assertEquals(DefaultRiskAnalysis.RuleViolation.NONE, DefaultRiskAnalysis.isStandard(standardTx));
+        
+        script = ScriptBuilder.createMultiSigOutputScript(1, keys);
+        standardTx.addOutput(MILLICOIN, script);
+        assertEquals(DefaultRiskAnalysis.RuleViolation.NONE, DefaultRiskAnalysis.isStandard(standardTx));
+        
+        // Increase our keys to 4 which should be invalid!
+        Transaction nonStandardTx = new Transaction(params);
+        keys.add(new ECKey());
+        script = ScriptBuilder.createMultiSigOutputScript(1, keys);
+        nonStandardTx.addInput(params.getGenesisBlock().getTransactions().get(0).getOutput(0));
+        nonStandardTx.addOutput(MILLICOIN, script);
+        
+        assertEquals(DefaultRiskAnalysis.RuleViolation.MULTISIG_TOO_MANY_PUBLIC_KEYS, DefaultRiskAnalysis.isStandard(nonStandardTx));
+ 
+        // Reset back to 3 ECKeys
+        keys.remove(0);
+        
+        // Lets check total number of signatures required OP_M if OP_N is correct
+        ScriptBuilder builder = new ScriptBuilder();
+        builder.smallNum(4);
+        for (ECKey key : keys) {
+            builder.data(key.getPubKey());
+        }
+        builder.smallNum(keys.size());
+        builder.op(OP_CHECKMULTISIG);
+        
+        Transaction anotherNonStandardTx = new Transaction(params);
+        anotherNonStandardTx.addInput(params.getGenesisBlock().getTransactions().get(0).getOutput(0));
+        anotherNonStandardTx.addOutput(MILLICOIN, builder.build());
+        assertEquals(DefaultRiskAnalysis.RuleViolation.MULTISIG_TOO_MANY_SIGS_REQUIRED, DefaultRiskAnalysis.isStandard(anotherNonStandardTx));   
+    }
+    
+    @Test
     public void nonShortestPossiblePushData() {
         ScriptChunk nonStandardChunk = new ScriptChunk(OP_PUSHDATA1, new byte[75]);
         byte[] nonStandardScript = new ScriptBuilder().addChunk(nonStandardChunk).build().getProgram();

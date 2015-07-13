@@ -27,6 +27,7 @@ import org.bitcoinj.core.TransactionInput;
 import org.bitcoinj.core.TransactionOutput;
 import org.bitcoinj.core.Wallet;
 import org.bitcoinj.crypto.TransactionSignature;
+import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptChunk;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -116,7 +117,16 @@ public class DefaultRiskAnalysis implements RiskAnalysis {
         DUST,
         SHORTEST_POSSIBLE_PUSHDATA,
         NONEMPTY_STACK, // Not yet implemented (for post 0.12)
-        SIGNATURE_CANONICAL_ENCODING
+        SIGNATURE_CANONICAL_ENCODING,
+        NOT_EXPECTED_OUTPUT_TYPE,
+        MULTISIG_TOO_MANY_PUBLIC_KEYS,
+        MULTISIG_TOO_MANY_SIGS_REQUIRED,
+        INPUT_TOO_LARGE,
+        INPUT_ONLY_PUSHDATA,
+        TRANSACTION_TOO_LARGE,
+        EXCEEDED_OPRETURN_LIMIT,
+        INPUT_TOO_MANY_SIGOPS
+        
     }
 
     /**
@@ -131,11 +141,29 @@ public class DefaultRiskAnalysis implements RiskAnalysis {
             log.warn("TX considered non-standard due to unknown version number {}", tx.getVersion());
             return RuleViolation.VERSION;
         }
+        
+        // Lets make sure this is not a crazy large transaction 
+        if (tx.bitcoinSerialize().length > Transaction.MAX_STANDARD_TX_SIZE) {
+            return RuleViolation.TRANSACTION_TOO_LARGE;
+        }
+        
+        // Lets check the outputs of this transactions
+        int opreturncounter = 0;
 
         final List<TransactionOutput> outputs = tx.getOutputs();
         for (int i = 0; i < outputs.size(); i++) {
             TransactionOutput output = outputs.get(i);
+            Script script = output.getScriptPubKey();
             RuleViolation violation = isOutputStandard(output);
+            
+            // Need to count OP_RETURNS used in transaction, only 1 allowed
+            if (script.isOpReturn()) {
+                opreturncounter = opreturncounter + 1;
+                
+                if (opreturncounter > 1) {
+                    violation = RuleViolation.EXCEEDED_OPRETURN_LIMIT;
+                }
+            }
             if (violation != RuleViolation.NONE) {
                 log.warn("TX considered non-standard due to output {} violating rule {}", i, violation);
                 return violation;
@@ -165,11 +193,55 @@ public class DefaultRiskAnalysis implements RiskAnalysis {
             if (chunk.isPushData() && !chunk.isShortestPossiblePushData())
                 return RuleViolation.SHORTEST_POSSIBLE_PUSHDATA;
         }
+
+        Script spk = output.getScriptPubKey();
+        
+        // Check if output only contains PUSHDATA
+        if (spk.isPushOnly()) {
+            return RuleViolation.INPUT_ONLY_PUSHDATA;
+        }
+        
+        // Check the ScriptPubKeys type, seems to be what Solver is doing in Core. 
+        if (!spk.isPayToScriptHash() && !spk.isSentToMultiSig() && !spk.isSentToAddress() && !spk.isSentToRawPubKey() && !spk.isOpReturn()) {
+            return RuleViolation.NOT_EXPECTED_OUTPUT_TYPE;
+        }
+        
+        // Check multisig m of n count
+        if (spk.isSentToMultiSig()) {
+        
+            // Check total number of keys in multisig, represents 'n' keys
+            if (spk.getPubKeys().size() < 1 || spk.getPubKeys().size() > 3) { 
+                return RuleViolation.MULTISIG_TOO_MANY_PUBLIC_KEYS;
+            }
+       
+            // Check number of public keys required to authorise payment, represents 'm' keys
+            if (spk.getNumberOfSignaturesRequiredToSpend() < 1 || spk.getNumberOfSignaturesRequiredToSpend() > 3) {
+                return RuleViolation.MULTISIG_TOO_MANY_SIGS_REQUIRED;
+            }
+            
+        }
+   
         return RuleViolation.NONE;
     }
 
     /** Checks if the given input passes some of the AreInputsStandard checks. Not complete. */
     public static RuleViolation isInputStandard(TransactionInput input) {
+        // Biggest 'standard' txin is a 15-of-15 P2SH multisig with compressed
+        // keys. (remember the 520 byte limit on redeemScript size) That works
+        // out to a (15*(33+1))+3=513 byte redeemScript, 513+1+15*(73+1)+3=1627
+        // bytes of scriptSig, which we round off to 1650 bytes for some minor
+        // future-proofing. That's also enough to spend a 20-of-20
+        // CHECKMULTISIG scriptPubKey, though such a scriptPubKey is not
+        // considered standard)
+    	
+        if (input.getScriptSig().getProgram().length > 1650) {
+            return RuleViolation.INPUT_TOO_LARGE;
+        }
+    
+        if (!input.getScriptSig().isPushOnly()) {
+            return RuleViolation.INPUT_ONLY_PUSHDATA;
+        }
+        
         for (ScriptChunk chunk : input.getScriptSig().getChunks()) {
             if (chunk.data != null && !chunk.isShortestPossiblePushData())
                 return RuleViolation.SHORTEST_POSSIBLE_PUSHDATA;

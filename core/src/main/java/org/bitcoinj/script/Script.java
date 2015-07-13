@@ -237,6 +237,19 @@ public class Script {
     }
 
     /**
+     * Returns true if this script only contains OP_PUSH data.
+     */
+    public boolean isPushOnly() { 
+        for (int i=0; i < chunks.size(); i++) {
+    	    if (!chunks.get(i).isPushData()) {
+    		    return false;
+    	    }
+        }
+    	
+        return true;
+    }
+    
+    /**
      * An alias for isPayToScriptHash.
      */
     @Deprecated
